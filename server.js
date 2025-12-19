@@ -384,7 +384,7 @@ app.get('/upload', (req, res) => {
             <form action="/api/upload" method="POST" enctype="multipart/form-data">
                 <p>Select an EPUB file to upload</p>
                 <div class="file-input-wrapper">
-                    <input type="file" name="epub" accept=".epub" required>
+                    <input type="file" name="epub" accept="application/epub+zip,.epub" required>
                 </div>
                 <button type="submit" class="upload-btn">Upload</button>
             </form>
