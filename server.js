@@ -1,128 +1,173 @@
-const express = require('express');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const express = require("express");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
+const { spawn } = require("child_process");
 
 const app = express();
 const PORT = 3001;
 
-const booksDir = path.join(__dirname, 'books');
-const tempDir = path.join(__dirname, 'temp');
+const booksDir = path.join(__dirname, "books");
+const tempDir = path.join(__dirname, "temp");
 
-[booksDir, tempDir].forEach(dir => {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
+[booksDir, tempDir].forEach((dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
 });
 
-app.use('/books', express.static(booksDir, {
+app.use(
+  "/books",
+  express.static(booksDir, {
     index: false,
     setHeaders: (res, _) => {
+      res.setHeader("Content-Type", "application/epub+zip");
+      res.setHeader("Cache-Control", "no-cache");
 
-        res.setHeader('Content-Type', 'application/epub+zip');
-        res.setHeader('Cache-Control', 'no-cache');
-
-        console.log('>>> DOWNLOAD REQUESTED');
-        console.log('   URL:', res.req.url);
-        console.log('   User-Agent:', res.req.headers['user-agent'] || 'unknown');
-        console.log('   IP:', res.req.ip || res.req.connection.remoteAddress);
-        console.log('   Content-Type:', res.getHeader('Content-Type'));
-        if (res.req.headers.range) {
-            console.log('   Range request:', res.req.headers.range);
-        }
-        console.log('-----------------------------------');
-    }
-}));
+      console.log(">>> DOWNLOAD REQUESTED");
+      console.log("   URL:", res.req.url);
+      console.log("   User-Agent:", res.req.headers["user-agent"] || "unknown");
+      console.log("   IP:", res.req.ip || res.req.connection.remoteAddress);
+      console.log("   Content-Type:", res.getHeader("Content-Type"));
+      if (res.req.headers.range) {
+        console.log("   Range request:", res.req.headers.range);
+      }
+      console.log("-----------------------------------");
+    },
+  }),
+);
 
 const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, tempDir);
-    },
-    filename: function (req, file, cb) {
-        const timestamp = Date.now();
-        const originalName = file.originalname.replace(/\.epub$/i, '');
-        const kepubName = `${originalName}_${timestamp}.kepub.epub`;
-        cb(null, kepubName);
-    }
+  destination: function (req, file, cb) {
+    cb(null, tempDir);
+  },
+  filename: function (req, file, cb) {
+    const timestamp = Date.now();
+    const originalName = file.originalname.replace(/\.epub$/i, "");
+    const uploadName = `${originalName}_${timestamp}.epub`;
+    cb(null, uploadName);
+  },
 });
 
 const upload = multer({
-    storage: storage,
-    fileFilter: function (req, file, cb) {
-        if (path.extname(file.originalname).toLowerCase() === '.epub') {
-            cb(null, true);
-        } else {
-            cb(new Error('Only EPUB ebooks are supported!'));
-        }
-    },
-    limits: {
-        fileSize: 50 * 1024 * 1024
+  storage: storage,
+  fileFilter: function (req, file, cb) {
+    if (path.extname(file.originalname).toLowerCase() === ".epub") {
+      cb(null, true);
+    } else {
+      cb(new Error("Only EPUB ebooks are supported!"));
     }
+  },
+  limits: {
+    fileSize: 50 * 1024 * 1024,
+  },
 });
 
 function getBooks() {
-    const files = fs.readdirSync(booksDir);
-    const kepubFiles = files.filter(file => 
-        file.toLowerCase().endsWith('.kepub.epub') || 
-        file.toLowerCase().endsWith('.kepub') || 
-        file.toLowerCase().endsWith('.epub')
-    );
+  const files = fs.readdirSync(booksDir);
+  const kepubFiles = files.filter(
+    (file) =>
+      file.toLowerCase().endsWith(".kepub.epub") ||
+      file.toLowerCase().endsWith(".kepub") ||
+      file.toLowerCase().endsWith(".epub"),
+  );
 
-    const booksWithInfo = kepubFiles.map(file => {
-        const filePath = path.join(booksDir, file);
-        const stats = fs.statSync(filePath);
-        const sizeInMB = (stats.size / (1024 * 1024)).toFixed(2);
+  const booksWithInfo = kepubFiles.map((file) => {
+    const filePath = path.join(booksDir, file);
+    const stats = fs.statSync(filePath);
+    const sizeInMB = (stats.size / (1024 * 1024)).toFixed(2);
 
-        return {
-            name: file,
-            size: `${sizeInMB} MB`,
-            sizeBytes: stats.size,
-            dateAdded: stats.mtime
-        };
-    });
+    return {
+      name: file,
+      size: `${sizeInMB} MB`,
+      sizeBytes: stats.size,
+      dateAdded: stats.mtime,
+    };
+  });
 
-    booksWithInfo.sort((a, b) => b.dateAdded - a.dateAdded);
-    return booksWithInfo;
+  booksWithInfo.sort((a, b) => b.dateAdded - a.dateAdded);
+  return booksWithInfo;
+}
+
+async function runKepubify(inputPath) {
+  const localExe = path.join(__dirname, "tools", "kepubify.exe");
+  const candidates = [];
+  if (fs.existsSync(localExe)) {
+    candidates.push({ cmd: localExe, args: [inputPath] });
+  }
+  candidates.push({ cmd: "kepubify", args: [inputPath] });
+  candidates.push({ cmd: "python", args: ["-m", "kepubify", inputPath] });
+  candidates.push({ cmd: "py", args: ["-m", "kepubify", inputPath] });
+
+  for (const c of candidates) {
+    try {
+      await new Promise((resolve, reject) => {
+        const proc = spawn(c.cmd, c.args, { stdio: "inherit", cwd: booksDir });
+        proc.on("error", (err) => reject(err));
+        proc.on("close", (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`${c.cmd} exited with code ${code}`));
+        });
+      });
+      return;
+    } catch (err) {
+      if (err && err.code === "ENOENT") {
+        console.warn(`${c.cmd} not found, trying next option.`);
+        continue;
+      }
+      console.warn(`${c.cmd} failed:`, err && err.message ? err.message : err);
+      // try next candidate
+    }
+  }
+
+  throw new Error(
+    "No kepubify command succeeded. Install kepubify or ensure 'python -m kepubify' works.",
+  );
 }
 
 function generateBooksHTML(books) {
-    if (books.length === 0) {
-        return '<p class="empty-message">No hay libros disponibles en el catálogo.</p>';
+  if (books.length === 0) {
+    return '<p class="empty-message">No hay libros disponibles en el catálogo.</p>';
+  }
+
+  let html = "";
+  books.forEach((book) => {
+    if (book.sizeBytes === 0) {
+      return;
     }
 
-    let html = '';
-    books.forEach(book => {
-        if (book.sizeBytes === 0) {
-            return;
-        }
-        
-        const title = book.name
-            .replace('.kepub', '')
-            .replace('.epub', '')
-            .replace(/_/g, ' ')
-            .replace(/\d{13}$/g, '');
-        
-        const escapedTitle = title.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        
-        html += `<div class="book-item">
+    const title = book.name
+      .replace(".kepub", "")
+      .replace(".epub", "")
+      .replace(/_/g, " ")
+      .replace(/\d{13}$/g, "");
+
+    const escapedTitle = title.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    html += `<div class="book-item">
                    <div class="book-title">${escapedTitle}</div>
                    <div class="book-info">Tamaño: ${book.size}</div>
                    <a href="/books/${encodeURIComponent(book.name)}" class="download-btn">Descargar</a>
                  </div>`;
-    });
-    
-    return html;
+  });
+
+  return html;
 }
 
-app.get('/', (req, res) => {
-    const books = getBooks();
-    const booksHTML = generateBooksHTML(books);
-    
-    const html = `<!DOCTYPE html>
+app.get("/favicon.ico", (req, res) => {
+  res.sendFile(path.join(__dirname, "favicon.ico"));
+});
+
+app.get("/", (req, res) => {
+  const books = getBooks();
+  const booksHTML = generateBooksHTML(books);
+
+  const html = `<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="./favicon.ico">
     <title>Kobi</title>
     <style>
         * {
@@ -272,16 +317,17 @@ app.get('/', (req, res) => {
     </div>
 </body>
 </html>`;
-    
-    res.send(html);
+
+  res.send(html);
 });
 
-app.get('/upload', (req, res) => {
-    const html = `<!DOCTYPE html>
+app.get("/upload", (req, res) => {
+  const html = `<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="./favicon.ico">
     <title>Upload book</title>
     <style>
         * {
@@ -392,48 +438,82 @@ app.get('/upload', (req, res) => {
     </div>
 </body>
 </html>`;
-    
-    res.send(html);
+
+  res.send(html);
 });
 
-app.get('/api/books', (req, res) => {
-    const books = getBooks();
-    res.json(books);
+app.get("/api/books", (req, res) => {
+  const books = getBooks();
+  res.json(books);
 });
 
-app.post('/api/upload', upload.single('epub'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).send('No file selected');
+app.post("/api/upload", upload.single("epub"), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).send("No file selected");
+  }
+
+  const tempPath = req.file.path;
+  const outputName = path.basename(tempPath).replace(/\.epub$/i, ".kepub.epub");
+  const expectedKepubInTemp = path.join(path.dirname(tempPath), outputName);
+  const expectedKepubInBooks = path.join(booksDir, outputName);
+  const expectedKepubInRoot = path.join(__dirname, outputName);
+
+  try {
+    console.log("Running kepubify on", tempPath);
+    await runKepubify(tempPath);
+
+    const generatedPath = [
+      expectedKepubInBooks,
+      expectedKepubInTemp,
+      expectedKepubInRoot,
+    ].find((p) => fs.existsSync(p));
+    if (generatedPath) {
+      if (generatedPath !== expectedKepubInBooks) {
+        fs.renameSync(generatedPath, expectedKepubInBooks);
+      }
+      fs.unlink(tempPath, () => {});
+      console.log("Converted and saved:", expectedKepubInBooks);
+      return res.redirect("/");
     }
 
-    const sourcePath = req.file.path;
-    const destPath = path.join(booksDir, req.file.filename);
-
-    fs.rename(sourcePath, destPath, (err) => {
-        if (err) {
-            console.error('Error saving file:', err);
-            return res.status(500).send('Error saving file');
-        }
-        
-        console.log('Saved file:', destPath);
-        
-        res.redirect('/');
+    // console.warn(
+    //   "Kepubify did not produce expected output, moving original file.",
+    // );
+    // const destPath = path.join(booksDir, path.basename(tempPath));
+    // fs.rename(tempPath, destPath, (err) => {
+    //   if (err) {
+    //     console.error("Error saving file:", err);
+    //     return res.status(500).send("Error saving file");
+    //   }
+    //   console.log("Saved original file:", destPath);
+    //   return res.redirect("/");
+    // });
+  } catch (err) {
+    console.error("Kepubify error:", err);
+    const destPath = path.join(booksDir, path.basename(tempPath));
+    fs.rename(tempPath, destPath, (renameErr) => {
+      if (renameErr) {
+        console.error("Error saving file after kepubify failure:", renameErr);
+        return res.status(500).send("Error saving file");
+      }
+      return res.redirect("/");
     });
+  }
 });
 
 app.use((err, req, res, next) => {
-    console.error('Error:', err);
-    if (err instanceof multer.MulterError) {
-        if (err.code === 'LIMIT_FILE_SIZE') {
-            return res.status(400).send('File size is too large');
-        }
-        return res.status(400).send(err.message);
-    } else if (err) {
-        return res.status(400).send(err.message);
+  console.error("Error:", err);
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).send("File size is too large");
     }
-    next();
+    return res.status(400).send(err.message);
+  } else if (err) {
+    return res.status(400).send(err.message);
+  }
+  next();
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on http://0.0.0.0:${PORT}`);
 });
